@@ -57,7 +57,7 @@ services:
     networks:
       - backend
     ports:
-      - "8888:8080"
+      - "127.0.0.1:8888:8080"
     volumes:
       - ./searxng:/etc/searxng:ro
     environment:
@@ -84,7 +84,7 @@ services:
     networks:
       - backend
     ports:
-      - "8081:8081"
+      - "127.0.0.1:8081:8081"
     environment:
       - API_KEY=${API_KEY}
       - SEARXNG_URL=${SEARXNG_URL:-http://searxng:8080}

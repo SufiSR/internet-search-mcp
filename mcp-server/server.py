@@ -11,6 +11,7 @@ to REST routes via FastAPI dependencies and to the MCP mount via ASGI middleware
 
 import logging
 import logging.config
+from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI
 from fastapi.responses import JSONResponse
@@ -19,7 +20,7 @@ from pydantic import BaseModel
 from auth import MCPAuthMiddleware, verify_api_key
 from config import settings
 from fetch import fetch_page
-from mcp_handler import get_mcp_asgi_app
+from mcp_handler import get_mcp_asgi_app, mcp as mcp_instance
 from scrape import scrape_page
 from search import search_web
 from tools import BrowseResult, PageResult, browse
@@ -57,6 +58,22 @@ logger = logging.getLogger(__name__)
 # FastAPI application
 # ---------------------------------------------------------------------------
 
+# Build the MCP sub-app first so its session manager is initialised before the
+# lifespan context below references it.
+mcp_app = get_mcp_asgi_app()
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    # StreamableHTTPSessionManager requires its anyio task group to be running
+    # before it can handle requests.  Starlette 0.52 does not propagate the
+    # lifespan of mounted sub-apps to the parent, so we start it here instead.
+    async with mcp_instance.session_manager.run():
+        logger.info("MCP session manager started")
+        yield
+    logger.info("MCP session manager stopped")
+
+
 app = FastAPI(
     title="AI Browsing MCP Stack",
     description=(
@@ -66,13 +83,13 @@ app = FastAPI(
     version="1.0.0",
     docs_url="/docs",
     redoc_url="/redoc",
+    lifespan=lifespan,
 )
 
 # ---------------------------------------------------------------------------
 # MCP server — mounted at /mcp with auth middleware
 # ---------------------------------------------------------------------------
 
-mcp_app = get_mcp_asgi_app()
 app.mount("/mcp", MCPAuthMiddleware(mcp_app))
 
 # ---------------------------------------------------------------------------
@@ -101,13 +118,13 @@ class BrowseRequest(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-@app.get("/health")
+@app.api_route("/health", methods=["GET", "HEAD"])
 async def health() -> dict:
     """
     Liveness check.
 
-    Returns 200 with service status. Does not check upstream dependencies —
-    use Docker healthchecks on individual containers for that.
+    Returns 200 with service status. Supports GET and HEAD for load balancers
+    and Docker healthchecks (wget --spider uses HEAD).
     """
     return {"status": "ok", "service": "browsing-mcp"}
 

@@ -16,6 +16,7 @@ MCP transport:
 import logging
 
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 
 from fetch import fetch_page
 from scrape import scrape_page
@@ -32,6 +33,19 @@ mcp = FastMCP(
         "Use 'search' for exploratory queries, 'fetch' for direct fast page retrieval, "
         "'crawl' for JavaScript-heavy or difficult pages, and 'browse' for an automatic "
         "pipeline that combines search, ranking, and content extraction."
+    ),
+    # When mounted inside FastAPI at /mcp, Starlette strips that prefix before
+    # handing off to this sub-app.  The sub-app therefore receives path="/" for
+    # every request, so the internal route must be registered at "/" not "/mcp".
+    streamable_http_path="/",
+    # DNS-rebinding protection is disabled here because:
+    #   1. MCPAuthMiddleware (in server.py) already enforces API-key auth on
+    #      every request before it reaches this app.
+    #   2. Caddy forwards the original Host header (play.plunet.com), which
+    #      would otherwise be rejected by the default allow-list of localhost
+    #      addresses.
+    transport_security=TransportSecuritySettings(
+        enable_dns_rebinding_protection=False,
     ),
 )
 
@@ -169,7 +183,12 @@ def get_mcp_asgi_app():
     """
     Return the MCP ASGI application for mounting in server.py.
 
+    FastMCP is configured with ``streamable_http_path="/"`` so that its
+    internal route matches the stripped path that FastAPI/Starlette passes
+    to the sub-app after removing the ``/mcp`` mount prefix.
+
     Returns:
-        Starlette-compatible ASGI app from FastMCP.
+        Starlette app from FastMCP, ready to be mounted at ``/mcp`` in
+        the main FastAPI application.
     """
     return mcp.streamable_http_app()
