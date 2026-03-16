@@ -1,0 +1,226 @@
+# =============================================================================
+# AI Browsing MCP Stack
+#
+# Two profiles are provided:
+#
+#   core        — redis + searxng + browsing-mcp only
+#                 Run with: docker compose --profile core up -d
+#                 Useful for testing without Firecrawl (crawl tool will return
+#                 503 Service Unavailable when Firecrawl is not running).
+#
+#   full        — everything including the Firecrawl stack (playwright, rabbitmq,
+#                 postgres, firecrawl-api)
+#                 Run with: docker compose --profile full up -d
+#                 Requires Firecrawl source to be cloned first:
+#                   git clone https://github.com/mendableai/firecrawl.git firecrawl-src
+#
+# Exposed ports (external → internal):
+#   8888 → SearXNG
+#   3002 → Firecrawl API   (full profile only)
+#   8081 → MCP / REST API
+#
+# Future extension point:
+#   A dedicated playwright-renderer service for the MCP render_with_browser()
+#   tool can be added here once implemented. See fetch.py for the placeholder.
+# =============================================================================
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # Redis — shared infrastructure (both profiles)
+  # Used by: SearXNG rate limiter, Firecrawl job rate limiting
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    restart: unless-stopped
+    profiles: [core, full]
+    networks:
+      - backend
+    volumes:
+      - redis_data:/data
+    command: redis-server --bind 0.0.0.0
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ---------------------------------------------------------------------------
+  # SearXNG — web search aggregation (both profiles)
+  # ---------------------------------------------------------------------------
+  searxng:
+    image: searxng/searxng:latest
+    container_name: searxng
+    restart: unless-stopped
+    profiles: [core, full]
+    networks:
+      - backend
+    ports:
+      - "8888:8080"
+    volumes:
+      - ./searxng:/etc/searxng:ro
+    environment:
+      - SEARXNG_BASE_URL=http://localhost:8888
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8080/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ---------------------------------------------------------------------------
+  # Browsing MCP — our MCP + REST API (both profiles)
+  # ---------------------------------------------------------------------------
+  browsing-mcp:
+    build:
+      context: ./mcp-server
+      dockerfile: Dockerfile
+    container_name: browsing-mcp
+    restart: unless-stopped
+    profiles: [core, full]
+    networks:
+      - backend
+    ports:
+      - "8081:8081"
+    environment:
+      - API_KEY=${API_KEY}
+      - SEARXNG_URL=${SEARXNG_URL:-http://searxng:8080}
+      - FIRECRAWL_URL=${FIRECRAWL_URL:-http://firecrawl-api:3002}
+      - RESULT_COUNT=${RESULT_COUNT:-10}
+      - SCRAPE_COUNT=${SCRAPE_COUNT:-3}
+      - MAX_CONTENT_LENGTH=${MAX_CONTENT_LENGTH:-50000}
+      - RATE_LIMIT_PER_MINUTE=${RATE_LIMIT_PER_MINUTE:-30}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    depends_on:
+      searxng:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8081/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ---------------------------------------------------------------------------
+  # The following services are part of the "full" profile only.
+  # They require Firecrawl source to be cloned:
+  #   git clone https://github.com/mendableai/firecrawl.git firecrawl-src
+  # ---------------------------------------------------------------------------
+
+  # RabbitMQ — Firecrawl v2 job queue
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: rabbitmq
+    restart: unless-stopped
+    profiles: [full]
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "check_running"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  # PostgreSQL — Firecrawl v2 persistence (custom build includes schema)
+  firecrawl-postgres:
+    build:
+      context: ${FIRECRAWL_SRC:-./firecrawl-src}/apps/nuq-postgres
+      dockerfile: Dockerfile
+    container_name: firecrawl-postgres
+    restart: unless-stopped
+    profiles: [full]
+    networks:
+      - backend
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:-postgres}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-postgres}
+      - POSTGRES_DB=${POSTGRES_DB:-postgres}
+    volumes:
+      - firecrawl_pg_data:/var/lib/postgresql/data
+
+  # Playwright Service — headless browser (Firecrawl internal dependency)
+  playwright-service:
+    build:
+      context: ${FIRECRAWL_SRC:-./firecrawl-src}/apps/playwright-service-ts
+      dockerfile: Dockerfile
+    container_name: playwright-service
+    restart: unless-stopped
+    profiles: [full]
+    networks:
+      - backend
+    environment:
+      - PORT=3000
+    cpus: 2.0
+    mem_limit: 4G
+
+  # Firecrawl API — advanced scraping service
+  firecrawl-api:
+    build:
+      context: ${FIRECRAWL_SRC:-./firecrawl-src}
+      dockerfile: apps/api/Dockerfile
+    container_name: firecrawl-api
+    restart: unless-stopped
+    profiles: [full]
+    networks:
+      - backend
+    ports:
+      - "3002:3002"
+    command: ["node", "dist/src/harness.js", "--start-docker"]
+    environment:
+      - HOST=0.0.0.0
+      - PORT=3002
+      - REDIS_URL=${FIRECRAWL_REDIS_URL:-redis://redis:6379}
+      - REDIS_RATE_LIMIT_URL=${FIRECRAWL_REDIS_URL:-redis://redis:6379}
+      - PLAYWRIGHT_MICROSERVICE_URL=${PLAYWRIGHT_SERVICE_URL:-http://playwright-service:3000/scrape}
+      - POSTGRES_HOST=firecrawl-postgres
+      - POSTGRES_USER=${POSTGRES_USER:-postgres}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-postgres}
+      - POSTGRES_DB=${POSTGRES_DB:-postgres}
+      - USE_DB_AUTHENTICATION=false
+      - NUM_WORKERS_PER_QUEUE=8
+      - ENV=local
+    depends_on:
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      playwright-service:
+        condition: service_started
+      firecrawl-postgres:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:3002/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    cpus: 4.0
+    mem_limit: 8G
+
+  # ---------------------------------------------------------------------------
+  # Future extension point — Playwright Renderer
+  # Uncomment and implement when adding interactive browser rendering support.
+  # The render_with_browser() function in fetch.py is the integration point.
+  #
+  # playwright-renderer:
+  #   image: your-custom-playwright-renderer:latest
+  #   container_name: playwright-renderer
+  #   profiles: [core, full]
+  #   restart: unless-stopped
+  #   networks:
+  #     - backend
+  #   environment:
+  #     - PORT=3001
+  # ---------------------------------------------------------------------------
+
+volumes:
+  redis_data:
+    driver: local
+  firecrawl_pg_data:
+    driver: local
+
+networks:
+  backend:
+    driver: bridge

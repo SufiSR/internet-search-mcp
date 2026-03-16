@@ -1,0 +1,28 @@
+# Web framework
+fastapi>=0.111.0
+uvicorn[standard]>=0.29.0
+
+# Async HTTP client — used for SearXNG, Firecrawl, and page fetching
+httpx>=0.27.0
+
+# MCP server SDK (Anthropic official)
+mcp[cli]>=1.0.0
+
+# BM25 ranking
+rank-bm25>=0.2.2
+
+# HTML content extraction and conversion
+readability-lxml>=0.8.1
+beautifulsoup4>=4.12.0
+markdownify>=0.12.1
+
+# Structured logging
+python-json-logger>=2.0.7
+
+# Settings management
+pydantic-settings>=2.2.0
+
+# Testing (only needed in dev / CI, not production, but kept here for simplicity)
+pytest>=8.0.0
+pytest-asyncio>=0.23.0
+respx>=0.21.0
